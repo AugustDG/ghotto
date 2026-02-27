@@ -182,12 +182,14 @@ func (m *model) applyFilter() {
 		m.filtered = m.allModels
 	} else {
 		q := strings.ToLower(m.filter)
-		m.filtered = m.filtered[:0]
+		// Allocate a new slice — never reuse the allModels backing array.
+		filtered := make([]string, 0, len(m.allModels))
 		for _, mod := range m.allModels {
 			if strings.Contains(strings.ToLower(mod), q) {
-				m.filtered = append(m.filtered, mod)
+				filtered = append(filtered, mod)
 			}
 		}
+		m.filtered = filtered
 	}
 
 	// Reset cursor to top of filtered list

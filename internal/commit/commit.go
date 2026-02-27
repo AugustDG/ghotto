@@ -168,21 +168,34 @@ func buildPrompt(diff, recentLog string) string {
 }
 
 // opencodeEvent represents a single event from opencode's JSON output.
+// opencode --format json emits newline-delimited JSON with events like:
+//
+//	{"type":"text","part":{"type":"text","text":"the message"}}
+//	{"type":"error","error":{"name":"APIError","data":{"message":"..."}}}
+//	{"type":"step_start",...}
+//	{"type":"step_finish",...}
 type opencodeEvent struct {
+	Type  string           `json:"type"`
+	Part  opencodeTextPart `json:"part"`
+	Error *opencodeError   `json:"error"`
+}
+
+type opencodeTextPart struct {
 	Type string `json:"type"`
-	// For assistant events
-	Part struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"part"`
-	// For text events at top level
 	Text string `json:"text"`
 }
 
+type opencodeError struct {
+	Name string `json:"name"`
+	Data struct {
+		Message string `json:"message"`
+	} `json:"data"`
+}
+
 // parseOpenCodeOutput extracts the assistant's text from opencode JSON output.
-// opencode --format json outputs newline-delimited JSON events.
 func parseOpenCodeOutput(data []byte) (string, error) {
 	var texts []string
+	var lastError string
 
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	// Increase buffer for large outputs
@@ -196,23 +209,29 @@ func parseOpenCodeOutput(data []byte) (string, error) {
 
 		var event opencodeEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			// Skip lines that aren't valid JSON
+			continue
+		}
+
+		// Check for error events
+		if event.Type == "error" && event.Error != nil {
+			msg := event.Error.Data.Message
+			if msg == "" {
+				msg = event.Error.Name
+			}
+			lastError = msg
 			continue
 		}
 
 		// Collect text from assistant text parts
-		if event.Type == "text" && event.Part.Text != "" {
+		if event.Type == "text" && event.Part.Type == "text" && event.Part.Text != "" {
 			texts = append(texts, event.Part.Text)
-		}
-		if event.Part.Type == "text" && event.Part.Text != "" {
-			texts = append(texts, event.Part.Text)
-		}
-		if event.Text != "" {
-			texts = append(texts, event.Text)
 		}
 	}
 
 	if len(texts) == 0 {
+		if lastError != "" {
+			return "", fmt.Errorf("opencode error: %s", lastError)
+		}
 		// Fallback: try to use the raw output if it looks like plain text
 		raw := strings.TrimSpace(string(data))
 		if raw != "" && !strings.HasPrefix(raw, "{") {
@@ -221,7 +240,7 @@ func parseOpenCodeOutput(data []byte) (string, error) {
 		return "", errors.New("no text found in opencode output")
 	}
 
-	// Take the last substantial text block (the final answer)
+	// Take the last text event (the final answer)
 	return texts[len(texts)-1], nil
 }
 
