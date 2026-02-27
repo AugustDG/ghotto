@@ -135,15 +135,17 @@ func generateMessage(model, diff, recentLog string) (string, error) {
 // buildPrompt constructs the prompt for the AI.
 func buildPrompt(diff, recentLog string) string {
 	var b strings.Builder
-	b.WriteString("Generate a git commit message for the following staged changes.\n\n")
-	b.WriteString("Rules:\n")
-	b.WriteString("- Use Conventional Commits format: type(scope): description\n")
-	b.WriteString("- Types: feat, fix, chore, refactor, docs, style, test, perf, ci, build, revert\n")
+
+	// Lead with the output constraint — hard and upfront.
+	b.WriteString("You are a commit message generator. Your entire response must be the raw commit message and nothing else. Do not include any explanation, commentary, markdown fencing, code blocks, quotation marks, or prefixes like \"Here is...\". Just the commit message text, ready to be passed directly to `git commit -m`.\n\n")
+
+	b.WriteString("Format rules:\n")
+	b.WriteString("- Conventional Commits: type(scope): description\n")
+	b.WriteString("- Valid types: feat, fix, chore, refactor, docs, style, test, perf, ci, build, revert\n")
 	b.WriteString("- Scope is optional but encouraged\n")
-	b.WriteString("- Description should be concise, imperative mood, lowercase\n")
+	b.WriteString("- Subject line: concise, imperative mood, lowercase, no trailing period\n")
+	b.WriteString("- If the change is complex, add a blank line then a short body (1-3 lines)\n")
 	b.WriteString("- If changes span multiple concerns, use the most significant type\n")
-	b.WriteString("- Add a blank line then a brief body only if the change is complex\n")
-	b.WriteString("- Output ONLY the commit message, no markdown fencing, no explanation\n")
 
 	if recentLog != "" {
 		b.WriteString("\nRecent commits for style reference:\n")
@@ -160,6 +162,9 @@ func buildPrompt(diff, recentLog string) string {
 		b.WriteString(diff)
 	}
 	b.WriteString("```\n")
+
+	// Repeat the constraint at the end so it's the last thing the model sees.
+	b.WriteString("\nRemember: output ONLY the commit message. No explanation, no markdown, no wrapping. Just the raw message text.\n")
 
 	return b.String()
 }

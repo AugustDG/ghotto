@@ -5,63 +5,44 @@ import (
 	"strings"
 
 	"github.com/AugustDG/ghotto/internal/config"
+	"github.com/AugustDG/ghotto/internal/opencode"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// provider holds a display name and its default model suggestion.
-type provider struct {
-	Name         string
-	ID           string
-	DefaultModel string
-}
-
-var providers = []provider{
-	{Name: "Anthropic", ID: "anthropic", DefaultModel: "claude-sonnet-4-20250514"},
-	{Name: "OpenAI", ID: "openai", DefaultModel: "gpt-4o"},
-	{Name: "Google", ID: "google", DefaultModel: "gemini-2.5-pro"},
-	{Name: "Groq", ID: "groq", DefaultModel: "llama-3.3-70b-versatile"},
-	{Name: "DeepSeek", ID: "deepseek", DefaultModel: "deepseek-chat"},
-	{Name: "OpenRouter", ID: "openrouter", DefaultModel: "anthropic/claude-sonnet-4-20250514"},
-	{Name: "Custom", ID: "", DefaultModel: ""},
-}
-
-type step int
-
-const (
-	stepProvider step = iota
-	stepCustomProvider
-	stepModel
-	stepDone
-)
+const maxVisible = 12
 
 type model struct {
-	step     step
-	cursor   int
-	provider provider
+	allModels []string // full list from opencode
+	filtered  []string // subset matching the filter
+	filter    string   // current filter text
+	cursor    int      // index into filtered
+	offset    int      // scroll offset for the visible window
 
-	// Text input state (used for custom provider and model ID)
-	textInput string
-	modelID   string
-
-	// Result
-	finalModel string
-	aborted    bool
+	selected string // final selection
+	aborted  bool
 
 	width int
 }
 
-// Run launches the interactive setup TUI and returns the selected model string
-// in "provider/model" format.
+// Run fetches the available models from opencode, launches the interactive
+// picker, and saves the selection to config.
 func Run() error {
 	cfg, _, err := config.Load()
 	if err != nil {
 		return err
 	}
 
-	fmt.Println()
+	fmt.Println("fetching available models from opencode...")
 
-	p := tea.NewProgram(initialModel(cfg))
+	models, err := opencode.ListModels()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("found %d models\n\n", len(models))
+
+	p := tea.NewProgram(initialModel(models, cfg))
 	result, err := p.Run()
 	if err != nil {
 		return fmt.Errorf("setup tui failed: %w", err)
@@ -73,7 +54,7 @@ func Run() error {
 		return nil
 	}
 
-	cfg.Model = m.finalModel
+	cfg.Model = m.selected
 	if err := config.SaveDefault(cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
@@ -82,11 +63,28 @@ func Run() error {
 	return nil
 }
 
-func initialModel(cfg config.Config) model {
-	return model{
-		step:  stepProvider,
-		width: 60,
+func initialModel(models []string, cfg config.Config) model {
+	m := model{
+		allModels: models,
+		filtered:  models,
+		width:     60,
 	}
+
+	// If the user already has a model configured, try to pre-select it
+	// by setting the filter to match and positioning the cursor.
+	if cfg.Model != "" {
+		for i, mod := range models {
+			if mod == cfg.Model {
+				m.cursor = i
+				if i >= maxVisible {
+					m.offset = i - maxVisible/2
+				}
+				break
+			}
+		}
+	}
+
+	return m
 }
 
 func (m model) Init() tea.Cmd {
@@ -100,78 +98,99 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		switch m.step {
-		case stepProvider:
-			return m.updateProvider(msg)
-		case stepCustomProvider:
-			return m.updateTextInput(msg, stepModel)
-		case stepModel:
-			return m.updateTextInput(msg, stepDone)
-		}
-	}
-
-	return m, nil
-}
-
-func (m model) updateProvider(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-	case "down", "j":
-		if m.cursor < len(providers)-1 {
-			m.cursor++
-		}
-	case "enter":
-		m.provider = providers[m.cursor]
-		if m.provider.ID == "" {
-			// Custom provider — need text input
-			m.step = stepCustomProvider
-			m.textInput = ""
-		} else {
-			m.step = stepModel
-			m.textInput = m.provider.DefaultModel
-		}
-	case "q", "esc", "ctrl+c":
-		m.aborted = true
-		return m, tea.Quit
-	}
-	return m, nil
-}
-
-func (m model) updateTextInput(msg tea.KeyMsg, nextStep step) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "enter":
-		value := strings.TrimSpace(m.textInput)
-		if value == "" {
-			return m, nil
-		}
-
-		if m.step == stepCustomProvider {
-			m.provider = provider{Name: value, ID: value, DefaultModel: ""}
-			m.step = stepModel
-			m.textInput = ""
-		} else if m.step == stepModel {
-			m.modelID = value
-			m.finalModel = m.provider.ID + "/" + m.modelID
-			m.step = stepDone
+		switch msg.String() {
+		case "ctrl+c":
+			m.aborted = true
 			return m, tea.Quit
-		}
-	case "backspace":
-		if len(m.textInput) > 0 {
-			m.textInput = m.textInput[:len(m.textInput)-1]
-		}
-	case "esc", "ctrl+c":
-		m.aborted = true
-		return m, tea.Quit
-	default:
-		// Only accept printable characters
-		if len(msg.String()) == 1 {
-			m.textInput += msg.String()
+
+		case "esc":
+			if m.filter != "" {
+				// Clear filter first
+				m.filter = ""
+				m.applyFilter()
+			} else {
+				m.aborted = true
+				return m, tea.Quit
+			}
+
+		case "up", "ctrl+p":
+			if m.cursor > 0 {
+				m.cursor--
+				m.scrollToCursor()
+			}
+
+		case "down", "ctrl+n":
+			if m.cursor < len(m.filtered)-1 {
+				m.cursor++
+				m.scrollToCursor()
+			}
+
+		case "home", "ctrl+a":
+			m.cursor = 0
+			m.offset = 0
+
+		case "end", "ctrl+e":
+			m.cursor = max(0, len(m.filtered)-1)
+			m.scrollToCursor()
+
+		case "pgup":
+			m.cursor = max(0, m.cursor-maxVisible)
+			m.scrollToCursor()
+
+		case "pgdown":
+			m.cursor = min(len(m.filtered)-1, m.cursor+maxVisible)
+			m.scrollToCursor()
+
+		case "enter":
+			if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+				m.selected = m.filtered[m.cursor]
+				return m, tea.Quit
+			}
+
+		case "backspace":
+			if len(m.filter) > 0 {
+				m.filter = m.filter[:len(m.filter)-1]
+				m.applyFilter()
+			}
+
+		default:
+			// Printable characters go into the filter
+			ch := msg.String()
+			if len(ch) == 1 && ch[0] >= 32 && ch[0] <= 126 {
+				m.filter += ch
+				m.applyFilter()
+			}
 		}
 	}
+
 	return m, nil
+}
+
+func (m *model) applyFilter() {
+	if m.filter == "" {
+		m.filtered = m.allModels
+	} else {
+		q := strings.ToLower(m.filter)
+		m.filtered = m.filtered[:0]
+		for _, mod := range m.allModels {
+			if strings.Contains(strings.ToLower(mod), q) {
+				m.filtered = append(m.filtered, mod)
+			}
+		}
+	}
+
+	// Reset cursor to top of filtered list
+	m.cursor = 0
+	m.offset = 0
+}
+
+func (m *model) scrollToCursor() {
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	}
+	if m.cursor >= m.offset+maxVisible {
+		m.offset = m.cursor - maxVisible + 1
+	}
 }
 
 // Styles
@@ -181,75 +200,82 @@ var (
 			Foreground(lipgloss.Color("12")).
 			MarginBottom(1)
 
-	selectedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("10")).
-			Bold(true)
+	filterLabelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("12")).
+				Bold(true)
 
-	normalStyle = lipgloss.NewStyle().
+	filterTextStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("15"))
+
+	cursorBlockStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("10")).
+				Bold(true)
+
+	selectedItemStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("10")).
+				Bold(true)
+
+	normalItemStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("7"))
 
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8"))
 
-	promptStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("12")).
-			Bold(true)
-
-	inputStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("15"))
-
-	cursorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("10")).
-			Bold(true)
+	noMatchStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("9")).
+			Italic(true)
 )
 
 func (m model) View() string {
 	var b strings.Builder
 
-	switch m.step {
-	case stepProvider:
-		b.WriteString(titleStyle.Render("Select a provider"))
-		b.WriteString("\n")
+	b.WriteString(titleStyle.Render("Select a model"))
+	b.WriteString("\n")
 
-		for i, p := range providers {
-			cursor := "  "
-			style := normalStyle
-			if i == m.cursor {
-				cursor = "> "
-				style = selectedStyle
-			}
-			line := cursor + style.Render(p.Name)
-			if p.DefaultModel != "" && i == m.cursor {
-				line += dimStyle.Render("  (" + p.DefaultModel + ")")
-			}
-			b.WriteString(line + "\n")
+	// Filter input
+	b.WriteString(filterLabelStyle.Render("  filter: "))
+	b.WriteString(filterTextStyle.Render(m.filter))
+	b.WriteString(cursorBlockStyle.Render("█"))
+	b.WriteString("\n\n")
+
+	// Model list
+	if len(m.filtered) == 0 {
+		b.WriteString("  ")
+		b.WriteString(noMatchStyle.Render("no models match \"" + m.filter + "\""))
+		b.WriteString("\n")
+	} else {
+		end := m.offset + maxVisible
+		if end > len(m.filtered) {
+			end = len(m.filtered)
 		}
 
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("↑/↓ navigate • enter select • esc quit"))
+		// Scroll indicator (top)
+		if m.offset > 0 {
+			b.WriteString(dimStyle.Render("  ↑ " + fmt.Sprintf("%d more", m.offset)))
+			b.WriteString("\n")
+		}
 
-	case stepCustomProvider:
-		b.WriteString(titleStyle.Render("Enter custom provider ID"))
-		b.WriteString("\n")
-		b.WriteString(promptStyle.Render("provider: "))
-		b.WriteString(inputStyle.Render(m.textInput))
-		b.WriteString(cursorStyle.Render("█"))
-		b.WriteString("\n\n")
-		b.WriteString(dimStyle.Render("type provider id • enter confirm • esc cancel"))
+		for i := m.offset; i < end; i++ {
+			if i == m.cursor {
+				b.WriteString("  > ")
+				b.WriteString(selectedItemStyle.Render(m.filtered[i]))
+			} else {
+				b.WriteString("    ")
+				b.WriteString(normalItemStyle.Render(m.filtered[i]))
+			}
+			b.WriteString("\n")
+		}
 
-	case stepModel:
-		b.WriteString(titleStyle.Render("Enter model ID"))
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("provider: "+m.provider.ID) + "\n")
-		b.WriteString(promptStyle.Render("model: "))
-		b.WriteString(inputStyle.Render(m.textInput))
-		b.WriteString(cursorStyle.Render("█"))
-		b.WriteString("\n\n")
-		b.WriteString(dimStyle.Render("type model id • enter confirm • esc cancel"))
-
-	case stepDone:
-		// Will be cleared by tea.Quit
+		// Scroll indicator (bottom)
+		remaining := len(m.filtered) - end
+		if remaining > 0 {
+			b.WriteString(dimStyle.Render("  ↓ " + fmt.Sprintf("%d more", remaining)))
+			b.WriteString("\n")
+		}
 	}
+
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("  ↑/↓ navigate • type to filter • enter select • esc quit"))
 
 	return b.String()
 }
