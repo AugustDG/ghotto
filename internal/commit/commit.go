@@ -244,24 +244,73 @@ func parseOpenCodeOutput(data []byte) (string, error) {
 	return texts[len(texts)-1], nil
 }
 
-// cleanMessage strips markdown fencing and extra whitespace from the message.
+// cleanMessage strips opencode system noise, markdown fencing, and extra
+// whitespace from the generated commit message.
 func cleanMessage(msg string) string {
 	msg = strings.TrimSpace(msg)
+
+	// Strip <system-reminder>...</system-reminder> blocks (and any XML-like tags).
+	msg = stripXMLTags(msg)
 
 	// Strip markdown code fences if present
 	if strings.HasPrefix(msg, "```") {
 		lines := strings.Split(msg, "\n")
 		if len(lines) >= 3 {
-			// Remove first and last lines (the fences)
 			lines = lines[1 : len(lines)-1]
-			if strings.HasPrefix(lines[len(lines)-1], "```") {
+			if len(lines) > 0 && strings.HasPrefix(lines[len(lines)-1], "```") {
 				lines = lines[:len(lines)-1]
 			}
 			msg = strings.Join(lines, "\n")
 		}
 	}
 
+	// Strip leading "---" separators that opencode sometimes injects
+	msg = strings.TrimLeft(msg, "-")
+
 	return strings.TrimSpace(msg)
+}
+
+// stripXMLTags removes any <tag>...</tag> blocks from the text, including
+// multiline ones like <system-reminder>...\n...</system-reminder>.
+func stripXMLTags(s string) string {
+	result := s
+	for {
+		start := strings.Index(result, "<")
+		if start == -1 {
+			break
+		}
+		// Find the tag name
+		tagEnd := strings.IndexAny(result[start+1:], "> \t\n")
+		if tagEnd == -1 {
+			break
+		}
+		tagName := result[start+1 : start+1+tagEnd]
+		if tagName == "" || tagName[0] == '/' {
+			// Stray closing tag or empty — just remove it up to >
+			closeAngle := strings.Index(result[start:], ">")
+			if closeAngle == -1 {
+				break
+			}
+			result = result[:start] + result[start+closeAngle+1:]
+			continue
+		}
+
+		// Look for the closing tag </tagName>
+		closingTag := "</" + tagName + ">"
+		closeIdx := strings.Index(result[start:], closingTag)
+		if closeIdx == -1 {
+			// Self-closing or unclosed — just remove the opening tag
+			closeAngle := strings.Index(result[start:], ">")
+			if closeAngle == -1 {
+				break
+			}
+			result = result[:start] + result[start+closeAngle+1:]
+		} else {
+			// Remove the entire <tag>...</tag> block
+			result = result[:start] + result[start+closeIdx+len(closingTag):]
+		}
+	}
+	return result
 }
 
 // readNonCommentLines reads a file and returns only non-comment lines.
