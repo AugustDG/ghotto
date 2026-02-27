@@ -11,6 +11,7 @@ import (
 
 	"github.com/AugustDG/ghotto/internal/config"
 	"github.com/AugustDG/ghotto/internal/git"
+	"github.com/AugustDG/ghotto/internal/opencode"
 )
 
 // Run executes the full commit flow:
@@ -32,6 +33,15 @@ func Run() error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	// Ensure the opencode agent exists; auto-create from config if missing.
+	if !opencode.AgentExists() {
+		fmt.Println("opencode agent not found, creating with default model...")
+		fmt.Println("(run 'gho setup' to configure interactively)")
+		if err := opencode.WriteCommitAgent(cfg.Model); err != nil {
+			return fmt.Errorf("creating opencode agent: %w", err)
+		}
+	}
+
 	diff, err := git.StagedDiff()
 	if err != nil {
 		return fmt.Errorf("reading staged diff: %w", err)
@@ -46,7 +56,7 @@ func Run() error {
 
 	fmt.Println("generating commit message...")
 
-	msg, err := generateMessage(cfg.Model, diff, recentLog)
+	msg, err := generateMessage(diff, recentLog)
 	if err != nil {
 		return fmt.Errorf("generating commit message: %w", err)
 	}
@@ -112,15 +122,13 @@ func Run() error {
 	return git.CommitWithFile(tmpFile.Name())
 }
 
-// generateMessage calls opencode run to produce a commit message.
-func generateMessage(model, diff, recentLog string) (string, error) {
+// generateMessage calls opencode run with the gho-commit agent to produce
+// a commit message. The system prompt / role / format rules live in the
+// agent file; this prompt is just the data (diff + recent log).
+func generateMessage(diff, recentLog string) (string, error) {
 	prompt := buildPrompt(diff, recentLog)
 
-	args := []string{"run", "--format", "json"}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-	args = append(args, prompt)
+	args := []string{"run", "--agent", opencode.AgentName, "--format", "json", prompt}
 
 	cmd := exec.Command("opencode", args...)
 	cmd.Stderr = os.Stderr
@@ -132,20 +140,13 @@ func generateMessage(model, diff, recentLog string) (string, error) {
 	return parseOpenCodeOutput(out)
 }
 
-// buildPrompt constructs the prompt for the AI.
+// buildPrompt constructs the user message for the agent. The system prompt
+// (role, format rules, output constraints) lives in the gho-commit agent
+// file, so this is just the data: recent commits for style + the diff.
 func buildPrompt(diff, recentLog string) string {
 	var b strings.Builder
 
-	// Lead with the output constraint — hard and upfront.
-	b.WriteString("You are a commit message generator. Your entire response must be the raw commit message and nothing else. Do not include any explanation, commentary, markdown fencing, code blocks, quotation marks, or prefixes like \"Here is...\". Just the commit message text, ready to be passed directly to `git commit -m`.\n\n")
-
-	b.WriteString("Format rules:\n")
-	b.WriteString("- Conventional Commits: type(scope): description\n")
-	b.WriteString("- Valid types: feat, fix, chore, refactor, docs, style, test, perf, ci, build, revert\n")
-	b.WriteString("- Scope is optional but encouraged\n")
-	b.WriteString("- Subject line: concise, imperative mood, lowercase, no trailing period\n")
-	b.WriteString("- If the change is complex, add a blank line then a short body (1-3 lines)\n")
-	b.WriteString("- If changes span multiple concerns, use the most significant type\n")
+	b.WriteString("Generate a commit message for the following staged changes.\n")
 
 	if recentLog != "" {
 		b.WriteString("\nRecent commits for style reference:\n")
@@ -162,9 +163,6 @@ func buildPrompt(diff, recentLog string) string {
 		b.WriteString(diff)
 	}
 	b.WriteString("```\n")
-
-	// Repeat the constraint at the end so it's the last thing the model sees.
-	b.WriteString("\nRemember: output ONLY the commit message. No explanation, no markdown, no wrapping. Just the raw message text.\n")
 
 	return b.String()
 }

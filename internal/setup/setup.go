@@ -60,6 +60,17 @@ func Run() error {
 	}
 
 	fmt.Printf("\nsaved model: %s\n", cfg.Model)
+
+	// Create or update the dedicated opencode agent for commit generation.
+	verb := "created"
+	if opencode.AgentExists() {
+		verb = "updated"
+	}
+	if err := opencode.WriteCommitAgent(cfg.Model); err != nil {
+		return fmt.Errorf("writing opencode agent: %w", err)
+	}
+	fmt.Printf("%s opencode agent: %s\n", verb, opencode.AgentName)
+
 	return nil
 }
 
