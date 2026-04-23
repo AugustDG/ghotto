@@ -217,19 +217,19 @@ var (
 				Foreground(lipgloss.Color("12")).
 				Bold(true)
 
-	filterTextStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("15"))
+	// No foreground — inherit the terminal's native foreground so both
+	// light and dark themes render legibly.
+	filterTextStyle = lipgloss.NewStyle()
 
 	cursorBlockStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("10")).
 				Bold(true)
 
 	selectedItemStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("10")).
+				Reverse(true).
 				Bold(true)
 
-	normalItemStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("7"))
+	normalItemStyle = lipgloss.NewStyle()
 
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8"))
